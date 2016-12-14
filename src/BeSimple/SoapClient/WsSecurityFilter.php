@@ -165,6 +165,7 @@ class WsSecurityFilter extends WsSecurityFilterClientServer implements SoapReque
                 $usernameToken->appendChild($password);
                 if (self::PASSWORD_TYPE_DIGEST === $this->passwordType) {
                     $nonce = $filterHelper->createElement(Helper::NS_WSS, 'Nonce', base64_encode($nonce));
+                    $filterHelper->setAttribute($nonce, null, 'EncodingType', Helper::NAME_WSS_SMS . '#Base64Binary');
                     $usernameToken->appendChild($nonce);
 
                     $created = $filterHelper->createElement(Helper::NS_WSU, 'Created', $createdTimestamp);
