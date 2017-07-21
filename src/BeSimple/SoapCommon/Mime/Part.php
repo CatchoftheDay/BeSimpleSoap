@@ -28,58 +28,38 @@ use BeSimple\SoapCommon\Helper;
  */
 class Part extends PartHeader
 {
-    /**
-     * Encoding type base 64
-     */
     const ENCODING_BASE64 = 'base64';
-
-    /**
-     * Encoding type binary
-     */
     const ENCODING_BINARY = 'binary';
-
-    /**
-     * Encoding type eight bit
-     */
     const ENCODING_EIGHT_BIT = '8bit';
-
-    /**
-     * Encoding type seven bit
-     */
     const ENCODING_SEVEN_BIT = '7bit';
-
-    /**
-     * Encoding type quoted printable
-     */
     const ENCODING_QUOTED_PRINTABLE = 'quoted-printable';
 
-    /**
-     * Content.
-     *
-     * @var mixed
-     */
+    const CHARSET_UTF8 = 'utf-8';
+
+    const CONTENT_TYPE_STREAM = 'application/octet-stream';
+    const CONTENT_TYPE_PDF = 'application/pdf';
+
+    /** @var mixed */
     protected $content;
 
     /**
-     * Construct new mime object.
-     *
      * @param mixed  $content     Content
      * @param string $contentType Content type
      * @param string $charset     Charset
      * @param string $encoding    Encoding
      * @param string $contentId   Content id
-     *
-     * @return void
      */
-    public function __construct($content = null, $contentType = 'application/octet-stream', $charset = null, $encoding = self::ENCODING_BINARY, $contentId = null)
-    {
+    public function __construct(
+        $content = null,
+        $contentType = self::CONTENT_TYPE_STREAM,
+        $charset = self::CHARSET_UTF8,
+        $encoding = self::ENCODING_BINARY,
+        $contentId = null
+    ) {
         $this->content = $content;
+
         $this->setHeader('Content-Type', $contentType);
-        if (!is_null($charset)) {
-            $this->setHeader('Content-Type', 'charset', $charset);
-        } else {
-            $this->setHeader('Content-Type', 'charset', 'utf-8');
-        }
+        $this->setHeader('Content-Type', 'charset', $charset);
         $this->setHeader('Content-Transfer-Encoding', $encoding);
         if (is_null($contentId)) {
             $contentId = $this->generateContentId();
@@ -88,9 +68,7 @@ class Part extends PartHeader
     }
 
     /**
-     * __toString.
-     *
-     * @return mixed
+     * @return string
      */
     public function __toString()
     {
@@ -107,12 +85,18 @@ class Part extends PartHeader
         return $this->content;
     }
 
+    public function hasContentId($contentTypeContentId)
+    {
+        return $contentTypeContentId === $this->getContentId();
+    }
+
+    public function getContentId()
+    {
+        return $this->getHeader('Content-ID');
+    }
+
     /**
-     * Set mime content.
-     *
-     * @param mixed $content Content to set
-     *
-     * @return void
+     * @param string $content
      */
     public function setContent($content)
     {
@@ -121,27 +105,25 @@ class Part extends PartHeader
 
     /**
      * Get complete mime message of this object.
-     *
      * @return string
      */
     public function getMessagePart()
     {
-        return $this->generateHeaders() . "\r\n" . $this->generateBody();
+        return $this->generateHeaders() . "\n" . $this->generateBody();
     }
 
     /**
      * Generate body.
-     *
      * @return string
      */
     protected function generateBody()
     {
         $encoding = strtolower($this->getHeader('Content-Transfer-Encoding'));
         $charset = strtolower($this->getHeader('Content-Type', 'charset'));
-        if ($charset != 'utf-8') {
-            $content = iconv('utf-8', $charset . '//TRANSLIT', $this->content);
+        if ($charset !== self::CHARSET_UTF8) {
+            $content = iconv(self::CHARSET_UTF8, $charset.'//TRANSLIT', $this->getContent());
         } else {
-            $content = $this->content;
+            $content = $this->getContent();
         }
         switch ($encoding) {
             case self::ENCODING_BASE64:
@@ -153,7 +135,7 @@ class Part extends PartHeader
             case self::ENCODING_SEVEN_BIT:
             case self::ENCODING_EIGHT_BIT:
             default:
-                return preg_replace("/\r\n|\r|\n/", "\r\n", $content);
+                return preg_replace("/\r\n|\r|\n/", "\n", $content);
         }
     }
 
@@ -164,6 +146,6 @@ class Part extends PartHeader
      */
     protected function generateContentId()
     {
-        return 'urn:uuid:' . Helper::generateUUID();
+        return 'part-' . Helper::generateUuid() . '@response.info';
     }
 }

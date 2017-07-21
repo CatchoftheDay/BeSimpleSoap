@@ -12,73 +12,123 @@
 
 namespace BeSimple\SoapServer;
 
-use BeSimple\SoapCommon\Helper;
+use BeSimple\SoapBundle\Soap\SoapAttachment;
+use BeSimple\SoapCommon\AttachmentsHandlerInterface;
+use BeSimple\SoapCommon\SoapKernel;
+use BeSimple\SoapCommon\SoapOptions\SoapOptions;
+use BeSimple\SoapCommon\SoapRequest;
+use BeSimple\SoapCommon\SoapRequestFactory;
+use BeSimple\SoapCommon\Storage\RequestHandlerAttachmentsStorage;
+use BeSimple\SoapServer\SoapOptions\SoapServerOptions;
 use BeSimple\SoapCommon\Converter\MtomTypeConverter;
 use BeSimple\SoapCommon\Converter\SwaTypeConverter;
+use Exception;
+use InvalidArgumentException;
 
 /**
  * Extended SoapServer that allows adding filters for SwA, MTOM, ... .
  *
  * @author Andreas Schamberger <mail@andreass.net>
  * @author Christian Kerl <christian-kerl@web.de>
+ * @author Petr Bechyně <mail@petrbechyne.com>
  */
 class SoapServer extends \SoapServer
 {
-    /**
-     * Soap version.
-     *
-     * @var int
-     */
-    protected $soapVersion = SOAP_1_1;
+    const SOAP_SERVER_REQUEST_FAILED = false;
 
-    /**
-     * Soap kernel.
-     *
-     * @var \BeSimple\SoapServer\SoapKernel
-     */
-    protected $soapKernel = null;
+    protected $soapVersion;
+    protected $soapServerOptions;
+    protected $soapOptions;
 
     /**
      * Constructor.
      *
-     * @param string               $wsdl    WSDL file
-     * @param array(string=>mixed) $options Options array
+     * @param SoapServerOptions $soapServerOptions
+     * @param SoapOptions $soapOptions
      */
-    public function __construct($wsdl, array $options = array())
+    public function __construct(SoapServerOptions $soapServerOptions, SoapOptions $soapOptions)
     {
-        // store SOAP version
-        if (isset($options['soap_version'])) {
-            $this->soapVersion = $options['soap_version'];
-        }
-        // create soap kernel instance
-        $this->soapKernel = new SoapKernel();
-        // set up type converter and mime filter
-        $this->configureMime($options);
-        // we want the exceptions option to be set
-        $options['exceptions'] = true;
-        parent::__construct($wsdl, $options);
+        $this->validateSoapConfigs($soapServerOptions, $soapOptions);
+
+        $this->soapVersion = $soapOptions->getSoapVersion();
+        $this->soapServerOptions = $soapServerOptions;
+        $this->soapOptions = $soapOptions;
+
+        parent::__construct(
+            $soapOptions->getWsdlFile(),
+            $soapServerOptions->toArray() + $soapOptions->toArray()
+        );
     }
 
     /**
      * Custom handle method to be able to modify the SOAP messages.
      *
+     * @deprecated
      * @param string $request Request string
+     * @return string
      */
     public function handle($request = null)
     {
-        // wrap request data in SoapRequest object
-        $soapRequest = SoapRequest::create($request, $this->soapVersion);
+        throw new Exception(
+            'The handle method is now deprecated, because it accesses $_SERVER, $_POST. Use handleRequest instead'
+        );
+    }
 
-        // handle actual SOAP request
-        try {
-            $soapResponse = $this->handle2($soapRequest);
-        } catch (\SoapFault $fault) {
-            // issue an error to the client
-            $this->fault($fault->faultcode, $fault->faultstring);
+    /**
+     * Custom handle method to be able to modify the SOAP messages.
+     *
+     * @param string $requestUrl
+     * @param string $soapAction
+     * @param string $requestContentType
+     * @param string $requestContent = null
+     * @return SoapRequest
+     */
+    public function createRequest($requestUrl, $soapAction, $requestContentType, $requestContent = null)
+    {
+        $soapRequest = SoapRequestFactory::createWithContentType(
+            $requestUrl,
+            $soapAction,
+            $this->soapVersion,
+            $requestContentType,
+            $requestContent
+        );
+        if ($this->soapOptions->hasAttachments()) {
+            $soapRequest = SoapKernel::filterRequest(
+                $soapRequest,
+                $this->getAttachmentFilters(),
+                $this->soapOptions->getAttachmentType()
+            );
         }
 
-        // send SOAP response to client
-        $soapResponse->send();
+        return $soapRequest;
+    }
+
+    public function handleRequest(SoapRequest $soapRequest)
+    {
+        try {
+
+            return $this->handleSoapRequest($soapRequest);
+
+        } catch (\SoapFault $fault) {
+
+            $this->fault($fault->faultcode, $fault->faultstring, $fault->faultactor, $fault->detail);
+
+            return self::SOAP_SERVER_REQUEST_FAILED;
+        }
+    }
+
+    public function handleWsdlRequest(SoapRequest $soapRequest)
+    {
+        ob_start();
+        parent::handle();
+        $nativeSoapServerResponse = ob_get_clean();
+
+        return SoapResponseFactory::create(
+            $nativeSoapServerResponse,
+            $soapRequest->getLocation(),
+            $soapRequest->getAction(),
+            $soapRequest->getVersion()
+        );
     }
 
     /**
@@ -90,81 +140,133 @@ class SoapServer extends \SoapServer
      *
      * @return SoapResponse
      */
-    public function handle2(SoapRequest $soapRequest)
+    private function handleSoapRequest(SoapRequest $soapRequest)
     {
-        // run SoapKernel on SoapRequest
-        $this->soapKernel->filterRequest($soapRequest);
+        /** @var AttachmentsHandlerInterface $handler */
+        $handler = $this->soapServerOptions->getHandler();
 
-        // call parent \SoapServer->handle() and buffer output
+        if ($this->soapOptions->hasAttachments()) {
+            $this->injectAttachmentStorage($handler, $soapRequest);
+        }
+
         ob_start();
         parent::handle($soapRequest->getContent());
-        $response = ob_get_clean();
+        $nativeSoapServerResponse = ob_get_clean();
+
+        $attachments = [];
+        if ($this->soapOptions->hasAttachments()) {
+            $attachments = $handler->getAttachmentStorage()->getAttachments();
+        }
 
         // Remove headers added by SoapServer::handle() method
         header_remove('Content-Length');
         header_remove('Content-Type');
 
-        // wrap response data in SoapResponse object
-        $soapResponse = SoapResponse::create(
-            $response,
+        return $this->createResponse(
             $soapRequest->getLocation(),
             $soapRequest->getAction(),
-            $soapRequest->getVersion()
+            $soapRequest->getVersion(),
+            $nativeSoapServerResponse,
+            $attachments
         );
+    }
 
-        // run SoapKernel on SoapResponse
-        $this->soapKernel->filterResponse($soapResponse);
+    /**
+     * @param string $requestLocation
+     * @param string $soapAction
+     * @param string $soapVersion
+     * @param string|null $responseContent
+     * @param SoapAttachment[] $attachments
+     * @return SoapResponse
+     */
+    private function createResponse($requestLocation, $soapAction, $soapVersion, $responseContent = null, array $attachments = [])
+    {
+        $soapResponse = SoapResponseFactory::create(
+            $responseContent,
+            $requestLocation,
+            $soapAction,
+            $soapVersion,
+            $attachments
+        );
+        if ($this->soapOptions->hasAttachments()) {
+            $soapResponse = SoapKernel::filterResponse(
+                $soapResponse,
+                $this->getAttachmentFilters(),
+                $this->soapOptions->getAttachmentType()
+            );
+        }
 
         return $soapResponse;
     }
 
-    /**
-     * Get SoapKernel instance.
-     *
-     * @return \BeSimple\SoapServer\SoapKernel
-     */
-    public function getSoapKernel()
+    private function injectAttachmentStorage(AttachmentsHandlerInterface $handler, SoapRequest $soapRequest)
     {
-        return $this->soapKernel;
+        $attachments = [];
+        if ($soapRequest->hasAttachments()) {
+            foreach ($soapRequest->getAttachments() as $attachment) {
+                $fileName = $attachment->getHeader('Content-Disposition', 'filename');
+                if ($fileName === null) {
+                    $fileName = basename($attachment->getHeader('Content-Location'));
+                }
+                $attachments[] = new SoapAttachment(
+                    $fileName,
+                    $attachment->getHeader('Content-Type'),
+                    $attachment->getContent()
+                );
+            }
+        }
+        $handler->addAttachmentStorage(new RequestHandlerAttachmentsStorage($attachments));
     }
 
     /**
-     * Configure filter and type converter for SwA/MTOM.
+     * Legacy code: TypeConverters should be resolved in SoapServer::__construct()
+     * To be removed if all tests pass
      *
-     * @param array &$options SOAP constructor options array.
-     *
-     * @return void
+     * @deprecated
+     * @param SoapOptions $soapOptions
+     * @return SoapOptions
      */
-    private function configureMime(array &$options)
+    private function configureTypeConverters(SoapOptions $soapOptions)
     {
-        if (isset($options['attachment_type']) && Helper::ATTACHMENTS_TYPE_BASE64 !== $options['attachment_type']) {
-            // register mime filter in SoapKernel
-            $mimeFilter = new MimeFilter($options['attachment_type']);
-            $this->soapKernel->registerFilter($mimeFilter);
-            // configure type converter
-            if (Helper::ATTACHMENTS_TYPE_SWA === $options['attachment_type']) {
-                $converter = new SwaTypeConverter();
-                $converter->setKernel($this->soapKernel);
-            } elseif (Helper::ATTACHMENTS_TYPE_MTOM === $options['attachment_type']) {
-                $xmlMimeFilter = new XmlMimeFilter($options['attachment_type']);
-                $this->soapKernel->registerFilter($xmlMimeFilter);
-                $converter = new MtomTypeConverter();
-                $converter->setKernel($this->soapKernel);
+        if ($soapOptions->getAttachmentType() !== SoapOptions::SOAP_ATTACHMENTS_TYPE_BASE64) {
+            if ($soapOptions->getAttachmentType() === SoapOptions::SOAP_ATTACHMENTS_TYPE_SWA) {
+                $soapOptions->getTypeConverterCollection()->add(new SwaTypeConverter());
+            } elseif ($soapOptions->getAttachmentType() === SoapOptions::SOAP_ATTACHMENTS_TYPE_MTOM) {
+                $soapOptions->getTypeConverterCollection()->add(new MtomTypeConverter());
+            } else {
+                throw new InvalidArgumentException('Unresolved SOAP_ATTACHMENTS_TYPE: ' . $soapOptions->getAttachmentType());
             }
-            // configure typemap
-            if (!isset($options['typemap'])) {
-                $options['typemap'] = array();
+        }
+
+        return $soapOptions;
+    }
+
+    private function getAttachmentFilters()
+    {
+        $filters = [];
+        if ($this->soapOptions->getAttachmentType() !== SoapOptions::SOAP_ATTACHMENTS_TYPE_BASE64) {
+            $filters[] = new MimeFilter();
+        }
+        if ($this->soapOptions->getAttachmentType() === SoapOptions::SOAP_ATTACHMENTS_TYPE_MTOM) {
+            $filters[] = new XmlMimeFilter();
+        }
+
+        return $filters;
+    }
+
+    private function validateSoapConfigs(SoapServerOptions $soapServerOptions, SoapOptions $soapOptions)
+    {
+        if ($soapOptions->hasAttachments()) {
+            if (!$soapServerOptions->getHandlerInstance() instanceof AttachmentsHandlerInterface) {
+                throw new InvalidArgumentException(
+                    sprintf(
+                        '%s::handlerObject or handlerClass (instance of %s given) must implement %s in order to handle with attachments',
+                        SoapServerOptions::class,
+                        get_class($soapServerOptions->getHandlerInstance()),
+                        AttachmentsHandlerInterface::class
+                    )
+                );
             }
-            $options['typemap'][] = array(
-                'type_name' => $converter->getTypeName(),
-                'type_ns'   => $converter->getTypeNamespace(),
-                'from_xml'  => function($input) use ($converter) {
-                    return $converter->convertXmlToPhp($input);
-                },
-                'to_xml'    => function($input) use ($converter) {
-                    return $converter->convertPhpToXml($input);
-                },
-            );
         }
     }
 }

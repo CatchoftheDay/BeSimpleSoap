@@ -13,14 +13,12 @@
 
 namespace BeSimple\SoapCommon;
 
-use BeSimple\SoapCommon\SoapMessage;
-
 /**
  * SOAP response message.
  *
  * @author Christian Kerl <christian-kerl@web.de>
+ * @author Petr Bechyně <mail@petrbechyne.com>
  */
 class SoapResponse extends SoapMessage
 {
-
 }
